@@ -1,3 +1,6 @@
+# Local / IDE (do not commit)
+.gocache-tmp/
+.idea/workspace.xml
 
 *.log
 *.orig
