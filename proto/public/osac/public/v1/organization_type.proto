@@ -24,6 +24,9 @@ message Organization {
 
   Metadata metadata = 2;
 
-  // Human friendly description of the organization, using Markdown format.
-  string description = 3;
+  OrganizationSpec spec = 3;
+}
+
+message OrganizationSpec {
+  // Reserved for future organization configuration fields.
 }

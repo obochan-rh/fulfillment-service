@@ -68,6 +68,14 @@ var NetworkClass = schema.GroupVersionKind{
 
 var NetworkClassList = listGVK(NetworkClass)
 
+var PublicIPPool = schema.GroupVersionKind{
+	Group:   "osac.openshift.io",
+	Version: "v1alpha1",
+	Kind:    "PublicIPPool",
+}
+
+var PublicIPPoolList = listGVK(PublicIPPool)
+
 var SecurityGroup = schema.GroupVersionKind{
 	Group:   "osac.openshift.io",
 	Version: "v1alpha1",
@@ -75,6 +83,14 @@ var SecurityGroup = schema.GroupVersionKind{
 }
 
 var SecurityGroupList = listGVK(SecurityGroup)
+
+var PublicIP = schema.GroupVersionKind{
+	Group:   "osac.openshift.io",
+	Version: "v1alpha1",
+	Kind:    "PublicIP",
+}
+
+var PublicIPList = listGVK(PublicIP)
 
 func listGVK(gvk schema.GroupVersionKind) schema.GroupVersionKind {
 	gvk.Kind = gvk.Kind + "List"

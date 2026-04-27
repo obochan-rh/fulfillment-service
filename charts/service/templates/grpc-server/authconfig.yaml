@@ -66,10 +66,11 @@ spec:
         authnMethod:
           value: jwt
   authorization:
-    "fulfillment-api":
+    default:
       opa:
+        allValues: true
         rego: |
-          import future.keywords.in
+          import rego.v1
 
           # Define admin service accounts:
           admin_service_accounts := {
@@ -86,48 +87,50 @@ spec:
           grpc_method := input.context.request.http.path
 
           # Get the subject name:
-          subject_name = input.auth.identity.user.username {
+          subject_name = input.auth.identity.user.username if {
             input.auth.identity.authnMethod == "serviceaccount"
           }
-          subject_name = input.auth.identity.username {
+          subject_name = input.auth.identity.username if {
             input.auth.identity.authnMethod == "jwt"
           }
 
           # Get the subject groups:
-          subject_groups = input.auth.identity.user.groups {
+          subject_groups = input.auth.identity.user.groups if {
             input.auth.identity.authnMethod == "serviceaccount"
           }
-          subject_groups = input.auth.identity.groups {
+          subject_groups = input.auth.identity.groups if {
             input.auth.identity.authnMethod == "jwt"
           }
 
-          # Function to check if an account is an admin account:
-          is_admin {
+          # Check if an account is an admin account:
+          default is_admin = false
+          is_admin if {
             subject_name in admin_service_accounts
           }
-          is_admin {
+          is_admin if {
             some group in subject_groups
             group in admin_groups
           }
 
-          # Function to check if an account is a client account:
-          is_client {
+          # Check if an account is a client account:
+          default is_client = false
+          is_client if {
             not is_admin
           }
 
           # Allow metadata, reflection and health to everyone:
-          allow {
+          allow if {
             startswith(grpc_method, "/metadata.")
           }
-          allow {
+          allow if {
             startswith(grpc_method, "/grpc.reflection.")
           }
-          allow {
+          allow if {
             startswith(grpc_method, "/grpc.health.")
           }
 
           # Allow specific methods to clients:
-          allow {
+          allow if {
             is_client
             grpc_method in {
               "/osac.public.v1.ClusterTemplates/Get",
@@ -151,11 +154,35 @@ spec:
               "/osac.public.v1.Events/Watch",
               "/osac.public.v1.HostTypes/Get",
               "/osac.public.v1.HostTypes/List",
+              "/osac.public.v1.NetworkClasses/Create",
+              "/osac.public.v1.NetworkClasses/Delete",
+              "/osac.public.v1.NetworkClasses/Get",
+              "/osac.public.v1.NetworkClasses/List",
+              "/osac.public.v1.NetworkClasses/Update",
+              "/osac.public.v1.Subnets/Create",
+              "/osac.public.v1.Subnets/Delete",
+              "/osac.public.v1.Subnets/Get",
+              "/osac.public.v1.Subnets/List",
+              "/osac.public.v1.Subnets/Update",
+              "/osac.public.v1.VirtualNetworks/Create",
+              "/osac.public.v1.VirtualNetworks/Delete",
+              "/osac.public.v1.VirtualNetworks/Get",
+              "/osac.public.v1.VirtualNetworks/List",
+              "/osac.public.v1.VirtualNetworks/Update",
+              "/osac.public.v1.SecurityGroups/Create",
+              "/osac.public.v1.SecurityGroups/Delete",
+              "/osac.public.v1.SecurityGroups/Get",
+              "/osac.public.v1.SecurityGroups/List",
+              "/osac.public.v1.SecurityGroups/Update",
+              "/osac.public.v1.PublicIPs/Create",
+              "/osac.public.v1.PublicIPs/Delete",
+              "/osac.public.v1.PublicIPs/Get",
+              "/osac.public.v1.PublicIPs/List",
             }
           }
 
           # Allow everything to admins:
-          allow {
+          allow if {
             is_admin
           }
   response:
@@ -171,6 +198,8 @@ spec:
                     : auth.identity.user.username.split(":")[3]
               tenants:
                 expression: |
-                  auth.identity.authnMethod == "jwt"
-                    ? auth.identity.groups
-                    : [auth.identity.user.username.split(":")[2]]
+                  auth.authorization.default.is_admin
+                    ? ["*"]
+                    : auth.identity.authnMethod == "jwt"
+                      ? auth.identity.groups
+                      : [auth.identity.user.username.split(":")[2]]
