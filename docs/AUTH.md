@@ -25,10 +25,12 @@ and configure the necessary mappings and authorization rules.
 4. [Fulfillment Service Configuration](#fulfillment-service-configuration)
 5. [User and Group Mapping](#user-and-group-mapping)
 6. [Tenancy Logic](#tenancy-logic)
-7. [Authorization Configuration](#authorization-configuration)
-8. [Authorization Flow](#authorization-flow)
-9. [Verification](#verification)
-10. [Troubleshooting](#troubleshooting)
+7. [Organization (Tenant) Management](#organization-tenant-management)
+8. [Break-Glass User](#break-glass-user)
+9. [Authorization Configuration](#authorization-configuration)
+10. [Authorization Flow](#authorization-flow)
+11. [Verification](#verification)
+12. [Troubleshooting](#troubleshooting)
 
 ## Prerequisites
 
@@ -586,12 +588,147 @@ To configure multi-tenant access in Keycloak:
    Keycloak to Include Groups in
    Tokens](#configuring-keycloak-to-include-groups-in-tokens))
 
-### Future Enhancements
+## Organization (Tenant) Management
 
-Future enhancements may include:
-- Support for an additional "organization" layer (requiring development)
-- Custom tenant naming conventions
-- Additional tenancy logic implementations for specific use cases
+Organizations are the administrative unit that maps to tenants in the fulfillment service. Each
+organization corresponds to a Keycloak Organization and manages users, identity providers, and
+resource isolation via tenancy.
+
+### Organizations API
+
+The fulfillment service exposes a public `Organizations` service with full CRUD operations:
+
+| Operation | gRPC Method | REST Endpoint |
+|-----------|------------|---------------|
+| Create | `Organizations/Create` | `POST /api/fulfillment/v1/organizations` |
+| Get | `Organizations/Get` | `GET /api/fulfillment/v1/organizations/{id}` |
+| List | `Organizations/List` | `GET /api/fulfillment/v1/organizations` |
+| Update | `Organizations/Update` | `PATCH /api/fulfillment/v1/organizations/{id}` |
+| Delete | `Organizations/Delete` | `DELETE /api/fulfillment/v1/organizations/{id}` |
+
+Organization CRUD is an **admin-only** operation. Only admin subjects (emergency service accounts,
+admin OAuth service accounts, or users in admin groups) can create, update, or delete organizations.
+
+### Organization Lifecycle
+
+When an organization is created:
+
+1. The fulfillment service creates the organization object
+2. The organization reconciler syncs it to the identity provider (Keycloak):
+   - Creates a Keycloak Organization
+   - Creates a **break-glass user** for emergency access (see [Break-Glass User](#break-glass-user))
+   - Assigns IdP manager permissions to the break-glass user
+3. The organization reaches `SYNCED` state when the IdP sync completes
+
+### CLI Examples
+
+```bash
+# Create an organization (admin only)
+osac create organization --name my-org
+
+# List organizations
+osac get organization
+
+# Delete an organization (admin only)
+osac delete organization <org-id>
+```
+
+## Break-Glass User
+
+When an organization is created, the system automatically provisions a **break-glass user** in
+Keycloak. This account provides emergency access to the organization for initial setup and
+recovery scenarios when the primary identity provider is unavailable.
+
+### Break-Glass Account Details
+
+| Property | Value |
+|----------|-------|
+| Username | `{org-name}-osac-break-glass` |
+| Email | `break-glass@{org-name}.osac.local` |
+| Initial password | Auto-generated (returned once at org creation) |
+| Password policy | **Temporary** — must be changed on first login |
+| Realm role | `tenant-idp-manager` |
+| Organization membership | Member of the created organization |
+
+The break-glass user has the `tenant-idp-manager` role, which grants:
+- All client-level permissions (compute, cluster, networking operations)
+- Future IdP management APIs when implemented
+
+The break-glass user does **not** have admin privileges. It cannot create or delete organizations,
+and it cannot access resources belonging to other organizations.
+
+### Logging In as the Break-Glass User
+
+After an organization is created, the break-glass credentials are returned in the organization's
+status. Use these to log in:
+
+```bash
+# Login as break-glass user (password flow)
+osac login https://fulfillment-api.osac.svc.cluster.local:8000 \
+  --user my-org-osac-break-glass \
+  --password '<initial-password>'
+```
+
+> **Note**: On first login, Keycloak will require a password change because the initial password
+> is marked as temporary. When using the `osac login --password` flow (direct access grants), you
+> must first change the password via the Keycloak Admin Console or API before you can authenticate.
+
+### Changing the Break-Glass Password
+
+The initial break-glass password is temporary and **must** be changed before the account can be
+used. There are several ways to do this:
+
+#### Option 1: Via Keycloak Admin Console
+
+1. Access the [Keycloak Admin Console](#accessing-keycloak-admin-console)
+2. Navigate to **Users** → search for `{org-name}-osac-break-glass`
+3. Go to the **Credentials** tab
+4. Click **Reset password**
+5. Set the new password and uncheck **Temporary** if you don't want to force another change
+6. Optionally, go to the **Details** tab and remove `UPDATE_PASSWORD` from **Required user actions**
+
+#### Option 2: Via Keycloak Admin API
+
+```bash
+# Find the break-glass user ID
+BG_USER_ID=$(curl -sk -X GET \
+  "https://keycloak.keycloak.svc.cluster.local:8000/admin/realms/osac/users?username={org-name}-osac-break-glass&exact=true" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" | jq -r '.[0].id')
+
+# Set a new (non-temporary) password
+curl -sk -X PUT \
+  "https://keycloak.keycloak.svc.cluster.local:8000/admin/realms/osac/users/${BG_USER_ID}/reset-password" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "password", "value": "NEW_SECURE_PASSWORD", "temporary": false}'
+
+# Clear the UPDATE_PASSWORD required action
+curl -sk -X PUT \
+  "https://keycloak.keycloak.svc.cluster.local:8000/admin/realms/osac/users/${BG_USER_ID}" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"requiredActions": []}'
+```
+
+After changing the password, you can log in normally:
+
+```bash
+osac login https://fulfillment-api.osac.svc.cluster.local:8000 \
+  --user my-org-osac-break-glass \
+  --password 'NEW_SECURE_PASSWORD'
+
+# Verify access
+osac get cluster
+```
+
+### Security Considerations
+
+- The initial break-glass password is only returned **once** at organization creation time. Store
+  it securely (e.g., in a secrets manager like Vault or Kubernetes Secrets).
+- The break-glass user is scoped to its organization — it cannot access resources from other
+  organizations.
+- Consider disabling the break-glass account after configuring an external identity provider for
+  the organization.
 
 ## Authorization Configuration
 
@@ -633,28 +770,37 @@ The authorization policy allows:
    - Health check endpoints (`/grpc.health.*`)
 
 2. **Client Users** (and tenant admins / IdP managers who inherit client permissions):
-   - Specific gRPC methods for:
-     - Clusters: `Create`, `Delete`, `Get`, `GetKubeconfig`,
-       `GetKubeconfigViaHttp`, `GetPassword`,
-       `GetPasswordViaHttp`, `List`, `Update`
-     - Cluster Templates: `Get`, `List`
-     - Cluster Catalog Items: `Get`, `List`
-     - Compute Instances: `Create`, `Delete`, `Get`, `List`, `Update`
-     - Compute Instance Templates: `Get`, `List`
-     - Console Sessions: `Create`
-     - Events: `Watch`
-     - Host Types: `Get`, `List`
-     - Network Classes: `Create`, `Delete`, `Get`, `List`, `Update`
-     - Public IP Attachments: `Create`, `Delete`, `Get`, `List`, `Update`
-     - Public IPs: `Create`, `Delete`, `Get`, `List`, `Update`
-     - Role Bindings: `Get`, `List`
-     - Roles: `Get`, `List`
-     - Security Groups: `Create`, `Delete`, `Get`, `List`, `Update`
-     - Subnets: `Create`, `Delete`, `Get`, `List`, `Update`
-     - Virtual Networks: `Create`, `Delete`, `Get`, `List`, `Update`
 
-3. **Tenant Admins** (in addition to client permissions):
-   - Users: `Create`, `Get`, `List`, `Update`, `Delete`
+   | Service | Allowed Methods |
+   |---------|-----------------|
+   | Bare Metal Instance Catalog Items | `Get`, `List` |
+   | Bare Metal Instance Templates | `Get`, `List` |
+   | Bare Metal Instances | `Create`, `Delete`, `Get`, `List`, `Update` |
+   | Cluster Catalog Items | `Get`, `List` |
+   | Cluster Templates | `Get`, `List` |
+   | Clusters | `Create`, `Delete`, `Get`, `GetKubeconfig`, `GetKubeconfigViaHttp`, `GetPassword`, `GetPasswordViaHttp`, `List`, `Update` |
+   | Compute Instance Templates | `Get`, `List` |
+   | Compute Instances | `Create`, `Delete`, `Get`, `List`, `Update` |
+   | Console Sessions | `Create` |
+   | Events | `Watch` |
+   | Host Types | `Get`, `List` |
+   | Instance Types | `Get`, `List` |
+   | Network Classes | `Create`, `Delete`, `Get`, `List`, `Update` |
+   | Public IP Attachments | `Create`, `Delete`, `Get`, `List`, `Update` |
+   | Public IP Pools | `Get`, `List` |
+   | Public IPs | `Create`, `Delete`, `Get`, `List`, `Update` |
+   | Role Bindings | `Get`, `List` |
+   | Roles | `Get`, `List` |
+   | Security Groups | `Create`, `Delete`, `Get`, `List`, `Update` |
+   | Subnets | `Create`, `Delete`, `Get`, `List`, `Update` |
+   | Virtual Networks | `Create`, `Delete`, `Get`, `List`, `Update` |
+
+3. **Tenant Admins** (in addition to all client permissions):
+
+   | Service | Allowed Methods |
+   |---------|-----------------|
+   | Bare Metal Instance Catalog Items | `Create`, `Update`, `Delete` |
+   | Users | `Create`, `Get`, `List`, `Update`, `Delete` |
 
 4. **Admin Users**:
    - All methods (full access)
